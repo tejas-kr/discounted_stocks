@@ -1,15 +1,10 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "src/discounted_stocks/discounted_stocks_server.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/index.py": {
+      "runtime": "python3.12"
     }
-  ],
+  },
   "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "src/discounted_stocks/discounted_stocks_server.py"
-    }
+    { "src": "/(.*)", "dest": "src/discounted_stocks/discounted_stocks_server.py" }
   ]
 }
