@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/discounted_stocks/discounted_stocks_server.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/discounted_stocks/discounted_stocks_server.py"
+    }
+  ]
+}
