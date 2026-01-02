@@ -6,7 +6,7 @@ authors = [
     {name = "Tejas K Jaiswal",email = "tejasjaiswal9711@gmail.com"}
 ]
 readme = "README.md"
-requires-python = "^3.12"
+requires-python = ">=3.12"
 dependencies = [
     "yfinance (>=1.0,<2.0)",
     "pandas (>=2.3.3,<3.0.0)",
