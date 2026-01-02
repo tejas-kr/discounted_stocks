@@ -2,7 +2,7 @@ import os
 
 from typing import List, Dict
 
-from dal_util.pg_db_conn import DatabaseConnection
+from src.dal_util.pg_db_conn import DatabaseConnection
 from src.stocks_data_reader.abstractions import StocksDataReader
 
 
