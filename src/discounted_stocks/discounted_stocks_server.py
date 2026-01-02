@@ -80,6 +80,7 @@ class StockAnalyzer:
         results = []
         for stock in stocks:
             symbol = stock['symbol']
+            company_name = stock['company_name']
             info = self.fetcher.fetch_stock_info(symbol)
             print(f"Symbol: {symbol}    info: {info}")
             if not info:
@@ -93,6 +94,7 @@ class StockAnalyzer:
 
             results.append({
                 "Symbol": symbol,
+                "CompanyName": company_name,
                 "Price": current_price,
                 "PE": round(pe_ratio, 2) if pe_ratio else "N/A",
                 "PB": round(pb_ratio, 2) if pb_ratio else "N/A",
@@ -103,7 +105,9 @@ class StockAnalyzer:
         if self.only_discount:
             results = [item for item in results if item['Status'] == 'DISCOUNTED']
 
-        self.notificator.send_telegram_notification(json.dumps(results, indent=2))
+        batch_limit = 10
+        for i in range(0, len(results), batch_limit):
+            self.notificator.send_telegram_notification(json.dumps(results[i:i+batch_limit], indent=2))
 
 
 class TelegramNotification(INotification):
