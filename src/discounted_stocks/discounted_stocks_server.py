@@ -1,14 +1,17 @@
+import io
 import os
+import csv
 import json
-from enum import Enum
 
 import requests
 import yfinance as yf
 
-from abc import ABC, abstractmethod
+from pytz import utc
+from datetime import datetime
 from typing import List, Dict
-from fastapi import FastAPI, Path, BackgroundTasks, HTTPException
 from fastapi.params import Query
+from abc import ABC, abstractmethod
+from fastapi import FastAPI, Path, BackgroundTasks, HTTPException
 
 from src.stocks_data_reader.factory import DataReaderFactory
 from src.consts import IS_SQL
@@ -32,9 +35,13 @@ class IDiscountEvaluator(ABC):
         ...
 
 
-class INotification(ABC):
+class IMessage(ABC):
     @abstractmethod
-    def send_telegram_notification(self, message: str) -> None:
+    def send_message(self, message: str) -> None:
+        ...
+
+    @abstractmethod
+    def send_file(self, contents: bytes, filename: str) -> None:
         ...
 
 
@@ -68,13 +75,16 @@ class FundamentalMarketDiscountEvaluator(IDiscountEvaluator):
 
 class StockAnalyzer:
     def __init__(self, fetcher: IStockDataFetcher, calculator: IDiscountCalculator,
-                 evaluator: IDiscountEvaluator, notificator: INotification,
+                 evaluator: IDiscountEvaluator, messanger: IMessage,
                  only_discount: bool = True):
         self.fetcher = fetcher
         self.calculator = calculator
         self.evaluator = evaluator
-        self.notificator = notificator
+        self.messanger = messanger
         self.only_discount = only_discount
+
+        self.send_as_text_message = False
+        self.send_as_file = True
 
     def analyze_stocks(self, stocks: List[Dict]) -> None:
         results = []
@@ -105,18 +115,40 @@ class StockAnalyzer:
         if self.only_discount:
             results = [item for item in results if item['Status'] == 'DISCOUNTED']
 
-        batch_limit = 10
-        for i in range(0, len(results), batch_limit):
-            self.notificator.send_telegram_notification(json.dumps(results[i:i+batch_limit], indent=2))
+        if self.send_as_text_message:
+            batch_limit = 10
+            for i in range(0, len(results), batch_limit):
+                self.messanger.send_message(json.dumps(results[i:i+batch_limit], indent=2))
+
+        if self.send_as_file:
+            text_buffer = io.StringIO()
+
+            writer = csv.DictWriter(
+                text_buffer,
+                fieldnames=results[0].keys(),
+            )
+            writer.writeheader()
+            writer.writerows(results)
+
+            bytes_buffer = io.BytesIO(text_buffer.getvalue().encode('utf-8'))
+            bytes_buffer.seek(0)
+
+            csv_bytes = bytes_buffer.getvalue()
+
+            self.messanger.send_file(
+                contents=csv_bytes,
+                filename="GiftFromDiscountedStocks_" + datetime.now(tz=utc).strftime("%Y%m%d-%H%M%S") + ".csv"
+            )
 
 
-class TelegramNotification(INotification):
+class TelegramMessanger(IMessage):
     def __init__(self, chat_id: str):
         self.telegram_token = os.environ["TELEGRAM_TOKEN"]
         self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{self.telegram_token}"
 
-    def send_telegram_notification(self, message: str) -> None:
-        url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+    def send_message(self, message: str) -> None:
+        url = f"{self.base_url}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
             "text": message
@@ -124,6 +156,22 @@ class TelegramNotification(INotification):
         resp = requests.post(url, data=payload)
         print(resp.status_code)
         print(resp.text)
+
+    def send_file(self, contents: bytes, filename: str) -> None:
+        url = f"{self.base_url}/sendDocument"
+        files = {
+            "document": (filename, contents, "text/csv")
+        }
+        data = {
+            "chat_id": self.chat_id,
+            "caption": "📊 Here is your CSV file as per your request"
+        }
+        try:
+            response = requests.post(url, data=data, files=files)
+            response.raise_for_status()  # Check for HTTP errors
+            print("CSV sent successfully!")
+        except Exception as exp:
+            print("Failed to send file!", exp)
 
 
 app = FastAPI()
@@ -143,8 +191,8 @@ async def discounted_stocks(background_tasks: BackgroundTasks, telegram_chat_id:
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification)
+        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
+        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}
@@ -162,8 +210,8 @@ async def all_stocks_status(background_tasks: BackgroundTasks, telegram_chat_id:
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification, only_discount=False)
+        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
+        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger, only_discount=False)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}
@@ -195,8 +243,8 @@ async def industry(
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification, only_discount=only_discount)
+        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
+        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger, only_discount=only_discount)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}
