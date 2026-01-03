@@ -111,9 +111,9 @@ class StockAnalyzer:
 
 
 class TelegramNotification(INotification):
-    def __init__(self):
+    def __init__(self, chat_id: str):
         self.telegram_token = os.environ["TELEGRAM_TOKEN"]
-        self.chat_id = os.environ["TELEGRAM_CHAT_ID"]
+        self.chat_id = chat_id
 
     def send_telegram_notification(self, message: str) -> None:
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
@@ -133,7 +133,7 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/discounted_stocks")
-async def discounted_stocks(background_tasks: BackgroundTasks):
+async def discounted_stocks(background_tasks: BackgroundTasks, telegram_chat_id: str):
     try:
         all_stocks: List[Dict] = DataReaderFactory.get_stocks_data_reader(
             data_store="sql" if IS_SQL else "file"
@@ -143,7 +143,7 @@ async def discounted_stocks(background_tasks: BackgroundTasks):
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification()
+        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
         analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
@@ -152,7 +152,7 @@ async def discounted_stocks(background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/all_stocks_status")
-async def all_stocks_status(background_tasks: BackgroundTasks):
+async def all_stocks_status(background_tasks: BackgroundTasks, telegram_chat_id: str):
     try:
         all_stocks: List[Dict] = DataReaderFactory.get_stocks_data_reader(
             data_store="sql" if IS_SQL else "file"
@@ -162,7 +162,7 @@ async def all_stocks_status(background_tasks: BackgroundTasks):
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification()
+        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
         analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification, only_discount=False)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
@@ -174,6 +174,7 @@ async def all_stocks_status(background_tasks: BackgroundTasks):
 @app.get("/industry/{industry}")
 async def industry(
         background_tasks: BackgroundTasks,
+        telegram_chat_id: str,
         industry: str = Path(
             ...,
             description=("The list of available industries - "
@@ -194,7 +195,7 @@ async def industry(
         fetcher: IStockDataFetcher = YFinanceStockFetcher()
         calculator: IDiscountCalculator = StandardDiscountCalculator()
         evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_notification: INotification = TelegramNotification()
+        telegram_notification: INotification = TelegramNotification(telegram_chat_id)
         analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_notification, only_discount=only_discount)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
