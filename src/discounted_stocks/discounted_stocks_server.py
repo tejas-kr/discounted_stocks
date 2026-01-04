@@ -2,6 +2,7 @@ import io
 import os
 import csv
 import json
+import logging
 
 import requests
 import yfinance as yf
@@ -13,8 +14,14 @@ from fastapi.params import Query
 from abc import ABC, abstractmethod
 from fastapi import FastAPI, Path, BackgroundTasks, HTTPException
 
-from src.stocks_data_reader.factory import DataReaderFactory
 from src.consts import IS_SQL
+from src.dal_util.redis_conn import IRedisClient, RedisClient
+from src.stocks_data_reader.factory import DataReaderFactory
+
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger.setLevel(logging.DEBUG)
 
 
 class IStockDataFetcher(ABC):
@@ -51,8 +58,63 @@ class YFinanceStockFetcher(IStockDataFetcher):
             stock = yf.Ticker(symbol + ".NS")
             return stock.info
         except Exception as e:
-            print(f"Error fetching data for {symbol}: {e}")
+            logger.exception(f"Error fetching data for {symbol}: {e}")
             return {}
+
+
+class CachedYFinanceStockFetcher(IStockDataFetcher):
+    def __init__(self, redis_client: IRedisClient, inner_fetcher: IStockDataFetcher, ttl: int = 1800):
+        self.redis_client = redis_client
+        self.inner_fetcher = inner_fetcher
+        self.ttl = ttl
+
+    def fetch_stock_info(self, symbol: str) -> Dict:
+        key = f"stock_info:{symbol}"
+        cached = self.redis_client.get(key)
+        if cached:
+            try:
+                logger.info("cached data found, using cached data.")
+                return json.loads(cached)
+            except json.JSONDecodeError:
+                pass  # cache miss
+        data = self.inner_fetcher.fetch_stock_info(symbol)
+        if data:
+            logger.info("Loading data into cache.")
+            self.redis_client.set(key, json.dumps(data), ex=self.ttl)
+        return data
+
+
+class TelegramMessanger(IMessage):
+    def __init__(self, chat_id: str):
+        self.telegram_token = os.environ["TELEGRAM_TOKEN"]
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{self.telegram_token}"
+
+    def send_message(self, message: str) -> None:
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": message
+        }
+        resp = requests.post(url, data=payload)
+        logger.debug(resp.status_code)
+        logger.debug(resp.text)
+
+    def send_file(self, contents: bytes, filename: str) -> None:
+        url = f"{self.base_url}/sendDocument"
+        files = {
+            "document": (filename, contents, "text/csv")
+        }
+        data = {
+            "chat_id": self.chat_id,
+            "caption": "📊 Here is your CSV file as per your request"
+        }
+        try:
+            response = requests.post(url, data=data, files=files)
+            response.raise_for_status()  # Check for HTTP errors
+            logger.debug("CSV sent successfully!")
+        except Exception as exp:
+            logger.debug("Failed to send file!", exp)
 
 
 class StandardDiscountCalculator(IDiscountCalculator):
@@ -92,7 +154,7 @@ class StockAnalyzer:
             symbol = stock['symbol']
             company_name = stock['company_name']
             info = self.fetcher.fetch_stock_info(symbol)
-            print(f"Symbol: {symbol}    info: {info}")
+            logger.debug(f"Symbol: {symbol}    info: {info}")
             if not info:
                 continue
             discount_pct = self.calculator.calculate_discount(info)
@@ -141,37 +203,19 @@ class StockAnalyzer:
             )
 
 
-class TelegramMessanger(IMessage):
-    def __init__(self, chat_id: str):
-        self.telegram_token = os.environ["TELEGRAM_TOKEN"]
-        self.chat_id = chat_id
-        self.base_url = f"https://api.telegram.org/bot{self.telegram_token}"
-
-    def send_message(self, message: str) -> None:
-        url = f"{self.base_url}/sendMessage"
-        payload = {
-            "chat_id": self.chat_id,
-            "text": message
-        }
-        resp = requests.post(url, data=payload)
-        print(resp.status_code)
-        print(resp.text)
-
-    def send_file(self, contents: bytes, filename: str) -> None:
-        url = f"{self.base_url}/sendDocument"
-        files = {
-            "document": (filename, contents, "text/csv")
-        }
-        data = {
-            "chat_id": self.chat_id,
-            "caption": "📊 Here is your CSV file as per your request"
-        }
-        try:
-            response = requests.post(url, data=data, files=files)
-            response.raise_for_status()  # Check for HTTP errors
-            print("CSV sent successfully!")
-        except Exception as exp:
-            print("Failed to send file!", exp)
+def get_analyser_object(telegram_chat_id: str, only_discount: bool = True) -> StockAnalyzer:
+    # Dependency injection setup
+    reddis_client: IRedisClient = RedisClient(url=os.environ["REDIS_URL"])
+    yf_fetcher: IStockDataFetcher = YFinanceStockFetcher()
+    cached_fetcher: IStockDataFetcher = CachedYFinanceStockFetcher(
+        redis_client=reddis_client,
+        inner_fetcher=yf_fetcher
+    )
+    calculator: IDiscountCalculator = StandardDiscountCalculator()
+    evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
+    telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
+    analyzer = StockAnalyzer(cached_fetcher, calculator, evaluator, telegram_messanger, only_discount)
+    return analyzer
 
 
 app = FastAPI()
@@ -187,12 +231,7 @@ async def discounted_stocks(background_tasks: BackgroundTasks, telegram_chat_id:
             data_store="sql" if IS_SQL else "file"
         ).read_data()
 
-        # Dependency injection setup
-        fetcher: IStockDataFetcher = YFinanceStockFetcher()
-        calculator: IDiscountCalculator = StandardDiscountCalculator()
-        evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger)
+        analyzer = get_analyser_object(telegram_chat_id)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}
@@ -206,12 +245,7 @@ async def all_stocks_status(background_tasks: BackgroundTasks, telegram_chat_id:
             data_store="sql" if IS_SQL else "file"
         ).read_data()
 
-        # Dependency injection setup
-        fetcher: IStockDataFetcher = YFinanceStockFetcher()
-        calculator: IDiscountCalculator = StandardDiscountCalculator()
-        evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger, only_discount=False)
+        analyzer = get_analyser_object(telegram_chat_id, only_discount=False)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}
@@ -239,12 +273,7 @@ async def industry(
             data_store="sql" if IS_SQL else "file"
         ).read_data_by_industry(industry)
 
-        # Dependency injection setup
-        fetcher: IStockDataFetcher = YFinanceStockFetcher()
-        calculator: IDiscountCalculator = StandardDiscountCalculator()
-        evaluator: IDiscountEvaluator = FundamentalMarketDiscountEvaluator()
-        telegram_messanger: IMessage = TelegramMessanger(telegram_chat_id)
-        analyzer = StockAnalyzer(fetcher, calculator, evaluator, telegram_messanger, only_discount=only_discount)
+        analyzer = get_analyser_object(telegram_chat_id, only_discount)
 
         background_tasks.add_task(analyzer.analyze_stocks, all_stocks)
         return {"message": "Job has been started successfully"}

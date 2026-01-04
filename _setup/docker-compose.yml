@@ -1,8 +1,9 @@
-version: '3.8'
+version: "3.8"
 
 services:
   postgres:
     image: postgres:13
+    container_name: postgres-db
     environment:
       POSTGRES_DB: discounted_stocks
       POSTGRES_USER: user
@@ -11,8 +12,32 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ../_setup/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ../_setup/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d discounted_stocks"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: redis-cache
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass myredispassword
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-a", "myredispassword", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pg_data:
+  redis_data:
